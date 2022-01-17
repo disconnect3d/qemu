@@ -402,6 +402,7 @@ extern long safe_syscall_base(int *pending, long number, ...);
 
 /* syscall.c */
 int host_to_target_waitstatus(int status);
+int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, mode_t mode);
 
 /* strace.c */
 void print_syscall(void *cpu_env, int num,

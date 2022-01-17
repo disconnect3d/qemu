@@ -1,0 +1,244 @@
+## Remote proto
+
+
+* https://sourceware.org/gdb/onlinedocs/gdb/Overview.html#Overview
+* Remote protocol ma checksume "$<odpowiedz>#<checksuma>"
+* Ale jest "noackmode": https://github.com/bminor/binutils-gdb/blob/8b91f9ce09bbb53ec103ec91583cea5f42f165c0/gdbserver/remote-utils.cc#L983-L997
+* Chyba mozna go wlaczyc wysylajac pakiet `QStartNoAckMode` (GDBServer taki odbiera):
+```
+getpkt ("QStartNoAckMode");  [sending ack]
+[sent ack]
+[noack mode enabled]
+```
+
+## Co powoduje ze nie mozemy `info proc mappings`?
+
+* w przypadku gdbserver gdb wysyla `qXfer:exec-file:read:168b4:0,1000` i dostaje zwrotke z sciezka do pliku
+
+## Diff between gdbserver and qemu-user GDBSTUB support
+
+Below is a diff between `show remote <...>` output for 1) gdbserver and 2) qemu gdb stub:
+```
+DIFF on TracepointSource-packet
+Support for the `TracepointSource' packet is auto-detected, currently enabled.
+
+Support for the `TracepointSource' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on library-info-svr4-packet
+Support for the `qXfer:libraries-svr4:read' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:libraries-svr4:read' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on memory-read-packet-size
+The memory-read-packet-size is 0 (default). Packets are limited to 18431 bytes.
+
+The memory-read-packet-size is 0 (default). Packets are limited to 4096 bytes.
+
+=============
+
+
+DIFF on memory-write-packet-size
+The memory-write-packet-size is 0 (default). Packets are limited to 18431 bytes.
+
+The memory-write-packet-size is 0 (default). Packets are limited to 4096 bytes.
+
+=============
+
+
+DIFF on agent-packet
+Support for the `QAgent' packet is auto-detected, currently enabled.
+
+Support for the `QAgent' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on no-resumed-stop-reply-packet
+Support for the `N stop reply' packet is auto-detected, currently enabled.
+
+Support for the `N stop reply' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on noack-packet
+Support for the `QStartNoAckMode' packet is auto-detected, currently enabled.
+
+Support for the `QStartNoAckMode' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on osdata-packet
+Support for the `qXfer:osdata:read' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:osdata:read' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on breakpoint-commands-packet
+Support for the `BreakpointCommands' packet is auto-detected, currently enabled.
+
+Support for the `BreakpointCommands' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on btrace-conf-bts-size-packet
+Support for the `Qbtrace-conf:bts:size' packet is auto-detected, currently enabled.
+
+Support for the `Qbtrace-conf:bts:size' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on pass-signals-packet
+Support for the `QPassSignals' packet is auto-detected, currently enabled.
+
+Support for the `QPassSignals' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on btrace-conf-pt-size-packet
+Support for the `Qbtrace-conf:pt:size' packet is auto-detected, currently enabled.
+
+Support for the `Qbtrace-conf:pt:size' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on pid-to-exec-file-packet
+Support for the `qXfer:exec-file:read' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:exec-file:read' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on catch-syscalls-packet
+Support for the `QCatchSyscalls' packet is auto-detected, currently enabled.
+
+Support for the `QCatchSyscalls' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on program-signals-packet
+Support for the `QProgramSignals' packet is auto-detected, currently enabled.
+
+Support for the `QProgramSignals' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on conditional-breakpoints-packet
+Support for the `ConditionalBreakpoints' packet is auto-detected, currently enabled.
+
+Support for the `ConditionalBreakpoints' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on conditional-tracepoints-packet
+Support for the `ConditionalTracepoints' packet is auto-detected, currently enabled.
+
+Support for the `ConditionalTracepoints' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on read-btrace-conf-packet
+Support for the `qXfer:btrace-conf' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:btrace-conf' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on disable-btrace-packet
+Support for the `Qbtrace:off' packet is auto-detected, currently enabled.
+
+Support for the `Qbtrace:off' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on read-btrace-packet
+Support for the `qXfer:btrace' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:btrace' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on disable-randomization-packet
+Support for the `QDisableRandomization' packet is auto-detected, currently enabled.
+
+Support for the `QDisableRandomization' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on enable-btrace-bts-packet
+Support for the `Qbtrace:bts' packet is auto-detected, currently enabled.
+
+Support for the `Qbtrace:bts' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on enable-btrace-pt-packet
+Support for the `Qbtrace:pt' packet is auto-detected, currently enabled.
+
+Support for the `Qbtrace:pt' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on read-siginfo-object-packet
+Support for the `qXfer:siginfo:read' packet is auto-detected, currently enabled.
+
+Support for the `qXfer:siginfo:read' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on environment-hex-encoded-packet
+Support for the `QEnvironmentHexEncoded' packet is auto-detected, currently enabled.
+
+Support for the `QEnvironmentHexEncoded' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on environment-reset-packet
+Support for the `QEnvironmentReset' packet is auto-detected, currently enabled.
+
+Support for the `QEnvironmentReset' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on environment-unset-packet
+Support for the `QEnvironmentUnset' packet is auto-detected, currently enabled.
+
+Support for the `QEnvironmentUnset' packet is auto-detected, currently disabled.
+
+=============
+
+
+DIFF on exec-event-feature-packet
+Support for the `exec-event-feature' packet is auto-detected, currently enabled.
+
+Support for the `exec-event-feature' packet is auto-detected, currently disabled.
+
+=============
+```

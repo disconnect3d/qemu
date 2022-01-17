@@ -33,6 +33,7 @@
 #include "trace/trace-root.h"
 #ifdef CONFIG_USER_ONLY
 #include "qemu.h"
+#include "linux-user/qemu.h"
 #else
 #include "monitor/monitor.h"
 #include "chardev/char.h"
@@ -551,6 +552,12 @@ static void put_buffer(const uint8_t *buf, int len)
 #ifdef CONFIG_USER_ONLY
     int ret;
 
+    printf("putpkt (\"%.*s\");\n", len, buf);
+    /*
+    ssize_t n = write(0, buf, len);
+    if (n == -1) exit(0);
+    printf("\n");*/
+
     while (len > 0) {
         ret = send(gdbserver_state.fd, buf, len, 0);
         if (ret < 0) {
@@ -899,6 +906,7 @@ static const char *get_feature_xml(const char *p, const char **newp,
                 pstrcat(buf, buf_sz, "</architecture>");
                 g_free(arch);
             }
+            pstrcat(buf, buf_sz, "<osabi>GNU/Linux</osabi>");
             pstrcat(buf, buf_sz, "<xi:include href=\"");
             pstrcat(buf, buf_sz, cc->gdb_core_xml_file);
             pstrcat(buf, buf_sz, "\"/>");
@@ -1373,10 +1381,36 @@ static const char *cmd_next_param(const char *param, const char delimiter)
     return param;
 }
 
+static int decode_nibble(char n) {
+    if (n >= '0' && n <= '9')
+        return n - (int)'0';
+    else if (n >= 'a' && n <= 'f')
+        return n - (int)'a' + 0xa;
+    else if (n >= 'A' && n <= 'F')
+        return n - (int)'A' + 0xa;
+    return -1;
+}
+
+// decode_hexpair('0', '2') -> 2
+// decode_hexpair('f', 'f') -> 255
+// decode_hexpair('F', '0') -> 240
+// decode_hexpair('.', '.') -> -1   // -1 for invalid inputs
+static int decode_hexpair(char a, char b) {
+    int high = decode_nibble(a);
+    if (high == -1)
+        return -1;
+    int low = decode_nibble(b);
+    if (low == -1)
+        return -1;
+
+    return (high << 4) + low;
+}
+
 static int cmd_parse_params(const char *data, const char *schema,
                             GArray *params)
 {
     const char *curr_schema, *curr_data;
+    char* tmp;
 
     g_assert(schema);
     g_assert(params->len == 0);
@@ -1400,6 +1434,34 @@ static int cmd_parse_params(const char *data, const char *schema,
                               (uint64_t *)&this_param.val_ull)) {
                 return -EINVAL;
             }
+            curr_data = cmd_next_param(curr_data, curr_schema[1]);
+            g_array_append_val(params, this_param);
+            break;
+        case 'x':
+            // TODO: Who does manage this memory?
+
+            //// Convert hexstring like "616161," to string
+            // Find expected string length
+            tmp = strchr(curr_data, curr_schema[1]);
+            size_t str_length = (tmp - curr_data) / 2;
+
+            // Allocate string for data
+            char* decoded_str = malloc(str_length + 1);  // +1 for null byte
+            if (!decoded_str)
+                return -EINVAL; // todo error
+
+            // Decode hex variables
+            for(size_t i=0; i<str_length; ++i) {
+                int ch = decode_hexpair(curr_data[i*2], curr_data[i*2+1]);
+                printf("Decoded [%lu]=\"%c%c\" ch=%d=%c\n", i, (char)curr_data[i*2], (char)curr_data[i*2+1], ch, (char)ch);
+                if (ch == -1)
+                    return -EINVAL;
+
+                decoded_str[i] = (char)ch;
+            }
+            decoded_str[str_length] = '\0';
+
+            this_param.data = decoded_str;
             curr_data = cmd_next_param(curr_data, curr_schema[1]);
             g_array_append_val(params, this_param);
             break;
@@ -1969,12 +2031,119 @@ cleanup:
 
 static void handle_v_kill(GArray *params, void *user_ctx)
 {
-    /* Kill the target */
-    put_packet("OK");
-    error_report("QEMU: Terminated via GDBstub");
-    gdb_exit(0);
-    exit(0);
+    /*
+    From https://sourceware.org/gdb/onlinedocs/gdb/Packets.html#vKill-packet :
+        ‘vKill;pid’
+        Kill the process with the specified process ID pid, which is a hexadecimal integer identifying the process. This packet is used in preference to ‘k’ when multiprocess protocol extensions are supported; see multiprocess extensions.
+
+        Reply:
+
+        ‘E nn’
+        for an error
+
+        ‘OK’
+        for success
+    */
+
+    /*
+    From https://github.com/bminor/binutils-gdb/blob/cf6059a6ace2ac14fdaf6dbec0235f87476f7842/gdb/NEWS#L4754-L4756 :
+    vKill
+        Kill the process with the specified process ID.  Use this in preference
+        to `k' when multiprocess protocol extensions are supported.
+
+    Comment: The vKill should probably only be supported with multiporcess debugging support?
+    */
+    //
+    // Return E01 aka "we do not support killing other PIDs"
+    put_packet("E01");
 }
+
+#ifdef CONFIG_USER_ONLY
+/*
+‘vFile:setfs: pid’
+    Select the filesystem on which vFile operations with filename arguments will operate. This is required for GDB to be able to access files on remote targets where the remote stub does not share a common filesystem with the inferior(s).
+
+    If pid is nonzero, select the filesystem as seen by process pid. If pid is zero, select the filesystem as seen by the remote stub. Return 0 on success, or -1 if an error occurs. If vFile:setfs: indicates success, the selected filesystem remains selected until the next successful vFile:setfs: operation.
+*/
+static void handle_v_setfs(GArray *params, void *user_ctx)
+{
+    // We do not support different pids etc; we just return that all is OK
+    //uint64_t pid = get_param(params, 0)->val_ul;
+    put_packet("F0");
+}
+
+/* From https://sourceware.org/gdb/onlinedocs/gdb/Host-I_002fO-Packets.html#Host-I_002fO-Packets 
+‘vFile:open: filename, flags, mode’
+    Open a file at filename and return a file descriptor for it, or return -1 if an error occurs. The filename is a string, flags is an integer indicating a mask of open flags (see Open Flags), and mode is an integer indicating a mask of mode bits to use if the file is created (see mode_t Values). See open, for details of the open flags and mode values.
+*/
+static void handle_v_file_open(GArray *params, void *user_ctx)
+{
+    const char* filename = get_param(params, 0)->data;
+    uint64_t flags = get_param(params, 1)->val_ull;
+    uint64_t mode = get_param(params, 2)->val_ull;
+
+    printf("vFile:open('%s', %ld, %ld)\n", filename, flags, mode);
+    int fd = do_openat(gdbserver_state.g_cpu, /* dirfd */ 0, filename, flags, mode);
+    printf("do_openat = %d\n", fd);
+
+
+    g_string_printf(gdbserver_state.str_buf, "F%d", fd);
+    if (fd < 0) {
+        // Append ENOENT result
+        // TODO/FIXME: Can we retrieve errno from do_openat?
+        g_string_append(gdbserver_state.str_buf, ",2");
+    }
+    put_strbuf();
+}
+
+static void handle_v_file_pread(GArray *params, void *user_ctx)
+{
+    /*
+    ‘vFile:pread: fd, count, offset’
+        Read data from the open file corresponding to fd. Up to count bytes will be read from the file, starting at offset relative to the start of the file. The target may read fewer bytes; common reasons include packet size limits and an end-of-file condition. The number of bytes read is returned. Zero should only be returned for a successful read at the end of the file, or if count was zero.
+
+        The data read should be returned as a binary attachment on success. If zero bytes were read, the response should include an empty binary attachment (i.e. a trailing semicolon). The return value is the number of target bytes read; the binary attachment may be longer if some characters were escaped.
+    */
+    // Example: vFile:pread:7,47ff,0
+    int fd = get_param(params, 0)->val_ul;
+    uint64_t count = get_param(params, 1)->val_ull;
+    uint64_t offset = get_param(params, 2)->val_ull;
+
+    g_autoptr(GString) file_content = g_string_new(NULL);
+
+    printf("Will read fd=%d, count=%lu, offset=%lu\n", fd, count, offset);
+    while (count > 0) {
+        char buf[1024] = {0};
+        ssize_t n = pread(fd, buf, sizeof(buf), offset);
+        if (n <= 0) {
+            break;
+        }
+        g_string_append_len(file_content, buf, n);
+        count -= n;
+        offset += n;
+    }
+    g_string_printf(gdbserver_state.str_buf, "F%lx;", file_content->len);
+    //memtohex(gdbserver_state.str_buf, (uint8_t *)file_content->str, file_content->len);
+    g_string_append_len(gdbserver_state.str_buf, file_content->str, file_content->len);
+    put_packet_binary(gdbserver_state.str_buf->str,
+                      gdbserver_state.str_buf->len, true);
+}
+static void handle_v_file_close(GArray *params, void *user_ctx)
+{
+    int fd = get_param(params, 0)->val_ul;
+    int res = close(fd);
+    if (res == 0) {
+        put_packet("F00");
+    }
+    else {
+        if (res != -1)
+            printf("[BUG] handle_v_file_close close call returned %d - this should not happen", res);
+        g_string_printf(gdbserver_state.str_buf, "F%d,%d", res, errno);
+        put_strbuf();
+    }
+}
+#endif //CONFIG_USER_ONLY
+
 
 static const GdbCmdParseEntry gdb_v_commands_table[] = {
     /* Order is important if has same prefix */
@@ -1995,12 +2164,39 @@ static const GdbCmdParseEntry gdb_v_commands_table[] = {
         .cmd_startswith = 1,
         .schema = "l0"
     },
+    #ifdef CONFIG_USER_ONLY
+    {
+        .handler = handle_v_setfs,
+        .cmd = "File:setfs:",
+        .cmd_startswith = 1,
+        .schema = "l0"
+    },
+    {
+        .handler = handle_v_file_open,
+        .cmd = "File:open:",
+        .cmd_startswith = 1,
+        .schema = "x,L,L0"
+    },
+    {
+        .handler = handle_v_file_pread,
+        .cmd = "File:pread:",
+        .cmd_startswith = 1,
+        .schema = "l,L,L0"
+    },
+    {
+        .handler = handle_v_file_close,
+        .cmd = "File:close:",
+        .cmd_startswith = 1,
+        .schema = "l0"
+    },
+    #endif
     {
         .handler = handle_v_kill,
         .cmd = "Kill;",
         .cmd_startswith = 1
-    },
+    }
 };
+
 
 static void handle_v_commands(GArray *params, void *user_ctx)
 {
@@ -2171,6 +2367,11 @@ static void handle_query_supported(GArray *params, void *user_ctx)
     if (gdbserver_state.c_cpu->opaque) {
         g_string_append(gdbserver_state.str_buf, ";qXfer:auxv:read+");
     }
+
+    // Those are needed for `remote get` and things like `info proc mappings`
+    // but may not be fully implemented
+    g_string_append(gdbserver_state.str_buf, ";qXfer:exec-file:read+");
+    g_string_append(gdbserver_state.str_buf, ";qXfer:libraries-svr4:read+");
 #endif
 
     if (params->len &&
@@ -2279,6 +2480,19 @@ static void handle_query_xfer_auxv(GArray *params, void *user_ctx)
     put_packet_binary(gdbserver_state.str_buf->str,
                       gdbserver_state.str_buf->len, true);
 }
+static void handle_query_xfer_exec_file(GArray *params, void *user_ctx)
+{
+    // TODO/FIXME: Handle: qXfer:exec-file:read:170cf:0,1000
+    // read:<pid>:<offset>:<length>
+    // How to determine pid?
+    put_packet("l/home/dc/src/qemu/ex/a.out");
+}
+
+static void handle_query_xfer_libraries_svr4(GArray *params, void *user_ctx)
+{
+    // TODO/FIXME: It seems gdbserver does return this
+    put_packet("E01");
+}
 #endif
 
 static void handle_query_attached(GArray *params, void *user_ctx)
@@ -2288,7 +2502,7 @@ static void handle_query_attached(GArray *params, void *user_ctx)
 
 static void handle_query_qemu_supported(GArray *params, void *user_ctx)
 {
-    g_string_printf(gdbserver_state.str_buf, "sstepbits;sstep");
+    g_string_append(gdbserver_state.str_buf, "sstepbits;sstep");
 #ifndef CONFIG_USER_ONLY
     g_string_append(gdbserver_state.str_buf, ";PhyMemMode");
 #endif
@@ -2334,7 +2548,11 @@ static const GdbCmdParseEntry gdb_gen_query_set_common_table[] = {
         .cmd = "qemu.sstep=",
         .cmd_startswith = 1,
         .schema = "l0"
-    },
+    }/*,
+    {
+        .handler = handle_start_no_ack_mode,
+        .cmd = "StartNoAckMode",
+    },*/
 };
 
 static const GdbCmdParseEntry gdb_gen_query_table[] = {
@@ -2390,6 +2608,18 @@ static const GdbCmdParseEntry gdb_gen_query_table[] = {
     {
         .handler = handle_query_xfer_auxv,
         .cmd = "Xfer:auxv:read::",
+        .cmd_startswith = 1,
+        .schema = "l,l0"
+    },
+    {
+        .handler = handle_query_xfer_exec_file,
+        .cmd = "Xfer:exec-file:read:",
+        .cmd_startswith = 1,
+        .schema = "l,l0"
+    },
+    {
+        .handler = handle_query_xfer_libraries_svr4,
+        .cmd = "Xfer:libraries-svr4:read:",
         .cmd_startswith = 1,
         .schema = "l,l0"
     },
@@ -2490,6 +2720,7 @@ static int gdb_handle_packet(const char *line_buf)
     const GdbCmdParseEntry *cmd_parser = NULL;
 
     trace_gdbstub_io_command(line_buf);
+    printf("getpkt (\"%s\");\n", line_buf);
 
     switch (line_buf[0]) {
     case '!':
