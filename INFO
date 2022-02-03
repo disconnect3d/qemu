@@ -15,6 +15,16 @@ getpkt ("QStartNoAckMode");  [sending ack]
 
 * w przypadku gdbserver gdb wysyla `qXfer:exec-file:read:168b4:0,1000` i dostaje zwrotke z sciezka do pliku
 
+```
+void _initialize_i386_linux_tdep ();
+void
+_initialize_i386_linux_tdep ()
+{
+  gdbarch_register_osabi (bfd_arch_i386, 0, GDB_OSABI_LINUX,
+                          i386_linux_init_abi);
+}
+```
+
 ## Diff between gdbserver and qemu-user GDBSTUB support
 
 Below is a diff between `show remote <...>` output for 1) gdbserver and 2) qemu gdb stub:

@@ -33,7 +33,9 @@
 #include "trace/trace-root.h"
 #ifdef CONFIG_USER_ONLY
 #include "qemu.h"
+#ifdef CONFIG_LINUX
 #include "linux-user/qemu.h"
+#endif
 #else
 #include "monitor/monitor.h"
 #include "chardev/char.h"
@@ -1381,36 +1383,10 @@ static const char *cmd_next_param(const char *param, const char delimiter)
     return param;
 }
 
-static int decode_nibble(char n) {
-    if (n >= '0' && n <= '9')
-        return n - (int)'0';
-    else if (n >= 'a' && n <= 'f')
-        return n - (int)'a' + 0xa;
-    else if (n >= 'A' && n <= 'F')
-        return n - (int)'A' + 0xa;
-    return -1;
-}
-
-// decode_hexpair('0', '2') -> 2
-// decode_hexpair('f', 'f') -> 255
-// decode_hexpair('F', '0') -> 240
-// decode_hexpair('.', '.') -> -1   // -1 for invalid inputs
-static int decode_hexpair(char a, char b) {
-    int high = decode_nibble(a);
-    if (high == -1)
-        return -1;
-    int low = decode_nibble(b);
-    if (low == -1)
-        return -1;
-
-    return (high << 4) + low;
-}
-
 static int cmd_parse_params(const char *data, const char *schema,
                             GArray *params)
 {
     const char *curr_schema, *curr_data;
-    char* tmp;
 
     g_assert(schema);
     g_assert(params->len == 0);
@@ -1434,34 +1410,6 @@ static int cmd_parse_params(const char *data, const char *schema,
                               (uint64_t *)&this_param.val_ull)) {
                 return -EINVAL;
             }
-            curr_data = cmd_next_param(curr_data, curr_schema[1]);
-            g_array_append_val(params, this_param);
-            break;
-        case 'x':
-            // TODO: Who does manage this memory?
-
-            //// Convert hexstring like "616161," to string
-            // Find expected string length
-            tmp = strchr(curr_data, curr_schema[1]);
-            size_t str_length = (tmp - curr_data) / 2;
-
-            // Allocate string for data
-            char* decoded_str = malloc(str_length + 1);  // +1 for null byte
-            if (!decoded_str)
-                return -EINVAL; // todo error
-
-            // Decode hex variables
-            for(size_t i=0; i<str_length; ++i) {
-                int ch = decode_hexpair(curr_data[i*2], curr_data[i*2+1]);
-                printf("Decoded [%lu]=\"%c%c\" ch=%d=%c\n", i, (char)curr_data[i*2], (char)curr_data[i*2+1], ch, (char)ch);
-                if (ch == -1)
-                    return -EINVAL;
-
-                decoded_str[i] = (char)ch;
-            }
-            decoded_str[str_length] = '\0';
-
-            this_param.data = decoded_str;
             curr_data = cmd_next_param(curr_data, curr_schema[1]);
             g_array_append_val(params, this_param);
             break;
@@ -2078,14 +2026,23 @@ static void handle_v_setfs(GArray *params, void *user_ctx)
 */
 static void handle_v_file_open(GArray *params, void *user_ctx)
 {
-    const char* filename = get_param(params, 0)->data;
     uint64_t flags = get_param(params, 1)->val_ull;
     uint64_t mode = get_param(params, 2)->val_ull;
 
-    printf("vFile:open('%s', %ld, %ld)\n", filename, flags, mode);
-    int fd = do_openat(gdbserver_state.g_cpu, /* dirfd */ 0, filename, flags, mode);
-    printf("do_openat = %d\n", fd);
+    // mem_buf is decoded filename
+    hextomem(gdbserver_state.mem_buf, get_param(params, 0)->data, strlen(get_param(params, 0)->data));
+    const char* null_byte = "\0";
+    g_byte_array_append(gdbserver_state.mem_buf, (const guint8*)null_byte, 1);
 
+    const char* filename = (const char*)gdbserver_state.mem_buf->data;
+
+    printf("vFile:open('%s', %ld, %ld)\n", filename, flags, mode);
+#ifdef CONFIG_LINUX
+    int fd = do_openat(gdbserver_state.g_cpu->env_ptr, /* dirfd */ 0, filename, flags, mode);
+#else
+    int fd = open(filename, flags, mode);
+#endif
+    printf("do_openat = %d\n", fd);
 
     g_string_printf(gdbserver_state.str_buf, "F%d", fd);
     if (fd < 0) {
@@ -2100,9 +2057,15 @@ static void handle_v_file_pread(GArray *params, void *user_ctx)
 {
     /*
     ‘vFile:pread: fd, count, offset’
-        Read data from the open file corresponding to fd. Up to count bytes will be read from the file, starting at offset relative to the start of the file. The target may read fewer bytes; common reasons include packet size limits and an end-of-file condition. The number of bytes read is returned. Zero should only be returned for a successful read at the end of the file, or if count was zero.
+        Read data from the open file corresponding to fd.
+        Up to count bytes will be read from the file, starting at offset relative to the start of the file.
+        The target may read fewer bytes; common reasons include packet size limits and an end-of-file condition.
+        The number of bytes read is returned. Zero should only be returned for a successful read at the end
+        of the file, or if count was zero.
 
-        The data read should be returned as a binary attachment on success. If zero bytes were read, the response should include an empty binary attachment (i.e. a trailing semicolon). The return value is the number of target bytes read; the binary attachment may be longer if some characters were escaped.
+        The data read should be returned as a binary attachment on success. If zero bytes were read,
+        the response should include an empty binary attachment (i.e. a trailing semicolon). The return value
+        is the number of target bytes read; the binary attachment may be longer if some characters were escaped.
     */
     // Example: vFile:pread:7,47ff,0
     int fd = get_param(params, 0)->val_ul;
@@ -2123,8 +2086,8 @@ static void handle_v_file_pread(GArray *params, void *user_ctx)
         offset += n;
     }
     g_string_printf(gdbserver_state.str_buf, "F%lx;", file_content->len);
-    //memtohex(gdbserver_state.str_buf, (uint8_t *)file_content->str, file_content->len);
-    g_string_append_len(gdbserver_state.str_buf, file_content->str, file_content->len);
+    // Encode special chars
+    memtox(gdbserver_state.str_buf, file_content->str, file_content->len);
     put_packet_binary(gdbserver_state.str_buf->str,
                       gdbserver_state.str_buf->len, true);
 }
@@ -2175,7 +2138,7 @@ static const GdbCmdParseEntry gdb_v_commands_table[] = {
         .handler = handle_v_file_open,
         .cmd = "File:open:",
         .cmd_startswith = 1,
-        .schema = "x,L,L0"
+        .schema = "s,L,L0"
     },
     {
         .handler = handle_v_file_pread,
@@ -2371,7 +2334,7 @@ static void handle_query_supported(GArray *params, void *user_ctx)
     // Those are needed for `remote get` and things like `info proc mappings`
     // but may not be fully implemented
     g_string_append(gdbserver_state.str_buf, ";qXfer:exec-file:read+");
-    g_string_append(gdbserver_state.str_buf, ";qXfer:libraries-svr4:read+");
+//    g_string_append(gdbserver_state.str_buf, ";qXfer:libraries-svr4:read+");
 #endif
 
     if (params->len &&
@@ -2485,7 +2448,12 @@ static void handle_query_xfer_exec_file(GArray *params, void *user_ctx)
     // TODO/FIXME: Handle: qXfer:exec-file:read:170cf:0,1000
     // read:<pid>:<offset>:<length>
     // How to determine pid?
-    put_packet("l/home/dc/src/qemu/ex/a.out");
+    TaskState *ts = gdbserver_state.c_cpu->opaque;
+
+//    g_string_assign(gdbserver_state.str_buf, "l");
+//    g_string_append(gdbserver_state.str_buf, ts->bprm->filename);
+    g_string_printf(gdbserver_state.str_buf, "l%s", ts->bprm->filename);
+    put_strbuf();
 }
 
 static void handle_query_xfer_libraries_svr4(GArray *params, void *user_ctx)
@@ -3337,6 +3305,10 @@ static void create_default_process(GDBState *s)
 {
     GDBProcess *process;
     int max_pid = 0;
+
+#if defined(CONFIG_USER_ONLY)
+    max_pid = getpid() - 1;
+#endif
 
     if (gdbserver_state.process_num) {
         max_pid = s->processes[s->process_num - 1].pid;
